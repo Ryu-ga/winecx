@@ -10,6 +10,8 @@ workflow:
 propagate:
   stage: build
   image: $CI_REGISTRY/$CI_PROJECT_NAMESPACE/crossover:debian-bullseye
+  tags:
+    - book-keeping
   rules:
     # To automatically create a commit to update the corresponding submodule
     # in the parent repository set the following variables:
