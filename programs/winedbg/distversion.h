@@ -2,8 +2,8 @@
  *   distversion.c
  *
  * Copyright 2013, CodeWeavers, Inc.
- * 
- * Information from DISTVERSION which needs to find 
+ *
+ * Information from DISTVERSION which needs to find
  * its way into the wine tree.
  * --------------------------------------------------------------- */
 

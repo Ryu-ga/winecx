@@ -57,12 +57,18 @@
 #include "msync.h"
 
 /*
- * We can't go higher because the maximum default size of of shared memory on XNU
- * is 4MB and we are using 8 bytes per entry.
+ * We need to set the maximum allowed shared memory size early, since on
+ * XNU it is not possible to call ftruncate() more than once...
+ * This isn't a problem in practice since it is lazily allocated.
  */
-#define MAX_INDEX 0x80000
+#define MAX_INDEX 0x100000
 
 #ifdef __APPLE__
+
+#define UL_COMPARE_AND_WAIT_SHARED  0x3
+#define ULF_WAKE_ALL                0x00000100
+extern int __ulock_wake( uint32_t operation, void *addr, uint64_t wake_value );
+
 
 #define MACH_CHECK_ERROR(ret, operation) \
     if (ret != KERN_SUCCESS) \
@@ -156,7 +162,7 @@ struct sem_node
     int tid;
 };
 
-#define MAX_POOL_NODES MAX_INDEX * 2
+#define MAX_POOL_NODES 0x80000
 
 struct node_memory_pool
 {
@@ -206,18 +212,10 @@ struct sem_list
 
 static struct sem_list mach_semaphore_map[MAX_INDEX];
 
-static char is_index_used[MAX_INDEX];
-
 static inline void add_sem( unsigned int shm_idx, semaphore_t sem, int tid )
 {
     struct sem_node *new_node;
     struct sem_list *list = mach_semaphore_map + shm_idx;
-    
-    if (!__atomic_load_n(&is_index_used[shm_idx], __ATOMIC_SEQ_CST))
-    {
-        fprintf( stderr, "msync: warning: trying to add semaphore to unused index\n" );
-        return;
-    }
 
     new_node = pool_alloc();
     new_node->sem = sem;
@@ -249,14 +247,19 @@ static inline void remove_sem( unsigned int shm_idx, int tid )
     }
 }
 
+static void *get_shm( unsigned int idx );
+
 static inline void destroy_all_internal( unsigned int shm_idx )
 {
     struct sem_node *current, *temp;
     struct sem_list *list = mach_semaphore_map + shm_idx;
+    int *shm = get_shm( shm_idx );
 
+    __atomic_store_n( shm + 2, 0, __ATOMIC_SEQ_CST );
+    __atomic_store_n( shm + 3, 0, __ATOMIC_SEQ_CST );
+    __ulock_wake( UL_COMPARE_AND_WAIT_SHARED | ULF_WAKE_ALL, (void *)shm, 0 );
     current = list->head;
     list->head = NULL;
-    __atomic_store_n( &is_index_used[shm_idx], 0, __ATOMIC_SEQ_CST );
 
     while (current)
     {
@@ -293,7 +296,7 @@ static inline mach_msg_return_t destroy_all( unsigned int shm_idx )
 {
     static mach_msg_header_t send_header;
     send_header.msgh_bits = MACH_MSGH_BITS_REMOTE(MACH_MSG_TYPE_COPY_SEND);
-    send_header.msgh_id = shm_idx | (1 << 19);
+    send_header.msgh_id = shm_idx | (1 << 28);
     send_header.msgh_size = sizeof(send_header);
     send_header.msgh_remote_port = receive_port;
 
@@ -301,9 +304,14 @@ static inline mach_msg_return_t destroy_all( unsigned int shm_idx )
                 0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, 0);
 }
 
-static inline mach_msg_return_t signal_all( unsigned int shm_idx )
+static inline mach_msg_return_t signal_all( unsigned int shm_idx, int *shm )
 {
     static mach_msg_header_t send_header;
+
+    __ulock_wake( UL_COMPARE_AND_WAIT_SHARED | ULF_WAKE_ALL, (void *)shm, 0 );
+    if (!__atomic_load_n( shm + 3, __ATOMIC_ACQUIRE ))
+        return MACH_MSG_SUCCESS;
+
     send_header.msgh_bits = MACH_MSGH_BITS_REMOTE(MACH_MSG_TYPE_COPY_SEND);
     send_header.msgh_id = shm_idx;
     send_header.msgh_size = sizeof(send_header);
@@ -335,19 +343,17 @@ static inline mach_msg_return_t receive_mach_msg( mach_register_message_t *buffe
             sizeof(*buffer), receive_port, MACH_MSG_TIMEOUT_NONE, 0 );
 }
 
-static void *get_shm( unsigned int idx );
-
 static inline void decode_msgh_id( unsigned int msgh_id, unsigned int *tid, unsigned int *count )
 {
     *tid = msgh_id >> 8;
     *count = msgh_id & 0xFF;
 }
 
-static inline unsigned int check_bit_20( unsigned int *shm_idx )
+static inline unsigned int check_bit_29( unsigned int *shm_idx )
 {
-    unsigned int bit_20 = (*shm_idx >> 19) & 1;
-    *shm_idx &= ~(1 << 19);
-    return bit_20;
+    unsigned int bit_29 = (*shm_idx >> 28) & 1;
+    *shm_idx &= ~(1 << 28);
+    return bit_29;
 }
 
 static void *mach_message_pump( void *args )
@@ -376,12 +382,12 @@ static void *mach_message_pump( void *args )
         /*
          * A message with no body is a signal_all or destroy_all operation where the shm_idx
          * is the msgh_id and the type of operation is decided by the 20th bit.
-         * (The shared memory index is only a 19-bit integer at max)
+         * (The shared memory index is only a 28-bit integer at max)
          * See signal_all( unsigned int shm_idx ) and destroy_all( unsigned int shm_idx )above.
          */
         if (receive_message.header.msgh_size == sizeof(mach_msg_header_t))
         {
-            if (check_bit_20( (unsigned int *)&receive_message.header.msgh_id ))
+            if (check_bit_29( (unsigned int *)&receive_message.header.msgh_id ))
                 destroy_all_internal( receive_message.header.msgh_id );
             else
                 signal_all_internal( receive_message.header.msgh_id );
@@ -408,10 +414,11 @@ static void *mach_message_pump( void *args )
         sem = receive_message.descriptor.name;
         for (i = 0; i < count; i++)
         {
-            is_mutex = check_bit_20( receive_message.shm_idx + i );
+            is_mutex = check_bit_29( receive_message.shm_idx + i );
             addr = (int *)get_shm( receive_message.shm_idx[i] );
             val = __atomic_load_n( addr, __ATOMIC_SEQ_CST );
-            if ((is_mutex && (val == 0 || val == ~0 || val == tid)) || (!is_mutex && val != 0))
+            if ((is_mutex && (val == 0 || val == ~0 || val == tid)) || (!is_mutex && val != 0)
+                || !__atomic_load_n( addr + 2, __ATOMIC_SEQ_CST ))
             {
                 /* The client had a TOCTTOU we need to fix */
                 semaphore_signal( sem );
@@ -443,9 +450,11 @@ int do_msync(void)
 #endif
 }
 
+#ifdef __APPLE__
+
 static char shm_name[29];
 static int shm_fd;
-static const off_t shm_size = MAX_INDEX * 8;
+static const off_t shm_size = MAX_INDEX * 16;
 static void **shm_addrs;
 static int shm_addrs_size;  /* length of the allocated shm_addrs array */
 static long pagesize;
@@ -467,19 +476,19 @@ static void set_thread_policy_qos( mach_port_t mach_thread_id )
     int throughput_qos, latency_qos;
     kern_return_t kr;
 
-    latency_qos = LATENCY_QOS_TIER_5;
+    latency_qos = LATENCY_QOS_TIER_0;
     kr = thread_policy_set( mach_thread_id, THREAD_LATENCY_QOS_POLICY,
                             (thread_policy_t)&latency_qos,
                             THREAD_LATENCY_QOS_POLICY_COUNT);
     if (kr != KERN_SUCCESS)
-        fprintf(stderr, "msync: error setting thread latency QoS.");
+        fprintf( stderr, "msync: error setting thread latency QoS.\n" );
 
-    throughput_qos = THROUGHPUT_QOS_TIER_5;
+    throughput_qos = THROUGHPUT_QOS_TIER_0;
     kr = thread_policy_set( mach_thread_id, THREAD_THROUGHPUT_QOS_POLICY,
                             (thread_policy_t)&throughput_qos,
                             THREAD_THROUGHPUT_QOS_POLICY_COUNT);
     if (kr != KERN_SUCCESS)
-        fprintf(stderr, "msync: error setting thread throughput QoS.");
+        fprintf( stderr, "msync: error setting thread throughput QoS.\n" );
 
     extended_policy.timeshare = 0;
     kr = thread_policy_set( mach_thread_id, THREAD_EXTENDED_POLICY,
@@ -496,6 +505,8 @@ static void set_thread_policy_qos( mach_port_t mach_thread_id )
         fprintf( stderr, "msync: error setting precedence policy\n" );
 }
 
+#endif
+
 void msync_init(void)
 {
 #ifdef __APPLE__
@@ -503,6 +514,7 @@ void msync_init(void)
     mach_port_t bootstrap_port;
     mach_port_limits_t limits;
     void *dlhandle = dlopen( NULL, RTLD_NOW );
+    int *shm;
 
     if (fstat( config_dir_fd, &st ) == -1)
         fatal_error( "cannot stat config dir\n" );
@@ -521,7 +533,6 @@ void msync_init(void)
 
     pagesize = sysconf( _SC_PAGESIZE );
 
-    is_index_used[0] = 1;
     shm_addrs = calloc( 128, sizeof(shm_addrs[0]) );
     shm_addrs_size = 128;
 
@@ -530,6 +541,9 @@ void msync_init(void)
         perror( "ftruncate" );
         fatal_error( "could not initialize shared memory\n" );
     }
+
+    shm = get_shm( 0 );
+    __atomic_store_n( shm + 2, 1, __ATOMIC_SEQ_CST );
 
     /* Bootstrap mach server message pump */
 
@@ -649,10 +663,12 @@ static void msync_destroy( struct object *obj )
 #endif
 }
 
+#ifdef __APPLE__
+
 static void *get_shm( unsigned int idx )
 {
-    int entry  = (idx * 8) / pagesize;
-    int offset = (idx * 8) % pagesize;
+    int entry  = (idx * 16) / pagesize;
+    int offset = (idx * 16) % pagesize;
 
     if (entry >= shm_addrs_size)
     {
@@ -680,12 +696,14 @@ static void *get_shm( unsigned int idx )
 
         if (__sync_val_compare_and_swap( &shm_addrs[entry], 0, addr ))
             munmap( addr, pagesize ); /* someone beat us to it */
+        else
+            memset( addr, 0, pagesize );
     }
 
     return (void *)((unsigned long)shm_addrs[entry] + offset);
 }
-
 static unsigned int shm_idx_counter = 1;
+#endif
 
 unsigned int msync_alloc_shm( int low, int high )
 {
@@ -700,22 +718,26 @@ unsigned int msync_alloc_shm( int low, int high )
 
     shm_idx = shm_idx_counter;
 
-    while (__atomic_load_n( &is_index_used[shm_idx], __ATOMIC_SEQ_CST ))
+    for(;;)
     {
+        shm = get_shm( shm_idx );
+        if (!__atomic_load_n( shm + 2, __ATOMIC_SEQ_CST ))
+            break;
+
         shm_idx = (shm_idx + 1) % MAX_INDEX;
         if (tries++ > MAX_INDEX)
         {
             /* The ftruncate call can only be successfully done with a non-zero length
              * once per shared memory region with XNU. We need to terminate now.
-             * Also, we initialized with the default maximum size anyways... */
-            fatal_error("too many msync objects\n");
+             * Also, we initialized with more than what is reasonable anyways... */
+            fatal_error( "too many msync objects\n" );
         }
     }
-    __atomic_store_n( &is_index_used[shm_idx], 1, __ATOMIC_SEQ_CST );
+    __atomic_store_n( shm + 2, 1, __ATOMIC_SEQ_CST );
     assert(mach_semaphore_map[shm_idx].head == NULL);
     shm_idx_counter = (shm_idx + 1) % MAX_INDEX;
 
-    shm = get_shm( shm_idx );
+
     assert(shm);
     shm[0] = low;
     shm[1] = high;
@@ -725,6 +747,8 @@ unsigned int msync_alloc_shm( int low, int high )
     return 0;
 #endif
 }
+
+#ifdef __APPLE__
 
 static int type_matches( enum msync_type type1, enum msync_type type2 )
 {
@@ -737,7 +761,6 @@ struct msync *create_msync( struct object *root, const struct unicode_str *name,
     unsigned int attr, int low, int high, enum msync_type type,
     const struct security_descriptor *sd )
 {
-#ifdef __APPLE__
     struct msync *msync;
 
     if ((msync = create_named_object( root, &msync_ops, name, attr, sd )))
@@ -769,10 +792,6 @@ struct msync *create_msync( struct object *root, const struct unicode_str *name,
     }
 
     return msync;
-#else
-    set_error( STATUS_NOT_IMPLEMENTED );
-    return NULL;
-#endif
 }
 
 /* shm layout for events or event-like objects. */
@@ -782,8 +801,11 @@ struct msync_event
     int unused;
 };
 
+#endif
+
 void msync_signal_all( unsigned int shm_idx )
 {
+#ifdef __APPLE__
     struct msync_event *event;
 
     if (debug_level)
@@ -794,11 +816,13 @@ void msync_signal_all( unsigned int shm_idx )
 
     event = get_shm( shm_idx );
     if (!__atomic_exchange_n( &event->signaled, 1, __ATOMIC_SEQ_CST ))
-        signal_all( shm_idx );
+        signal_all( shm_idx, (int *)event );
+#endif
 }
 
 void msync_wake_up( struct object *obj )
 {
+#ifdef __APPLE__
     enum msync_type type;
 
     if (debug_level)
@@ -806,17 +830,21 @@ void msync_wake_up( struct object *obj )
 
     if (obj->ops->get_msync_idx)
         msync_signal_all( obj->ops->get_msync_idx( obj, &type ) );
+#endif
 }
 
 void msync_destroy_semaphore( unsigned int shm_idx )
 {
+#ifdef __APPLE__
     if (!shm_idx) return;
 
     destroy_all( shm_idx );
+#endif
 }
 
 void msync_clear_shm( unsigned int shm_idx )
 {
+#ifdef __APPLE__
     struct msync_event *event;
 
     if (debug_level)
@@ -827,10 +855,12 @@ void msync_clear_shm( unsigned int shm_idx )
 
     event = get_shm( shm_idx );
     __atomic_store_n( &event->signaled, 0, __ATOMIC_SEQ_CST );
+#endif
 }
 
 void msync_clear( struct object *obj )
 {
+#ifdef __APPLE__
     enum msync_type type;
 
     if (debug_level)
@@ -838,24 +868,31 @@ void msync_clear( struct object *obj )
 
     if (obj->ops->get_msync_idx)
         msync_clear_shm( obj->ops->get_msync_idx( obj, &type ) );
+#endif
 }
 
 void msync_set_event( struct msync *msync )
 {
+#ifdef __APPLE__
     struct msync_event *event = get_shm( msync->shm_idx );
     assert( msync->obj.ops == &msync_ops );
 
     if (!__atomic_exchange_n( &event->signaled, 1, __ATOMIC_SEQ_CST ))
-        signal_all( msync->shm_idx );
+        signal_all( msync->shm_idx, (int *)event );
+#endif
 }
 
 void msync_reset_event( struct msync *msync )
 {
+#ifdef __APPLE__
     struct msync_event *event = get_shm( msync->shm_idx );
     assert( msync->obj.ops == &msync_ops );
 
     __atomic_store_n( &event->signaled, 0, __ATOMIC_SEQ_CST );
+#endif
 }
+
+#ifdef __APPLE__
 
 struct mutex
 {
@@ -863,8 +900,11 @@ struct mutex
     int count;  /* recursion count */
 };
 
+#endif
+
 void msync_abandon_mutexes( struct thread *thread )
 {
+#ifdef __APPLE__
     struct msync *msync;
 
     LIST_FOR_EACH_ENTRY( msync, &mutex_list, struct msync, mutex_entry )
@@ -877,13 +917,15 @@ void msync_abandon_mutexes( struct thread *thread )
                 fprintf( stderr, "msync_abandon_mutexes() idx=%d\n", msync->shm_idx );
             mutex->tid = ~0;
             mutex->count = 0;
-            signal_all ( msync->shm_idx );
+            signal_all ( msync->shm_idx, (int *)mutex );
         }
     }
+#endif
 }
 
 DECL_HANDLER(create_msync)
 {
+#ifdef __APPLE__
     struct msync *msync;
     struct unicode_str name;
     struct object *root;
@@ -913,10 +955,12 @@ DECL_HANDLER(create_msync)
     }
 
     if (root) release_object( root );
+#endif
 }
 
 DECL_HANDLER(open_msync)
 {
+#ifdef __APPLE__
     struct unicode_str name = get_req_unicode_str();
 
     reply->handle = open_object( current->process, req->rootdir, req->access,
@@ -941,11 +985,13 @@ DECL_HANDLER(open_msync)
         reply->shm_idx = msync->shm_idx;
         release_object( msync );
     }
+#endif
 }
 
 /* Retrieve the index of a shm section which will be signaled by the server. */
 DECL_HANDLER(get_msync_idx)
 {
+#ifdef __APPLE__
     struct object *obj;
     enum msync_type type;
 
@@ -968,9 +1014,12 @@ DECL_HANDLER(get_msync_idx)
     }
 
     release_object( obj );
+#endif
 }
 
 DECL_HANDLER(get_msync_apc_idx)
 {
+#ifdef __APPLE__
     reply->shm_idx = current->msync_apc_idx;
+#endif
 }
