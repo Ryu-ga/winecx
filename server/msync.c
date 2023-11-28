@@ -27,6 +27,9 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <sys/mman.h>
+#include <sys/types.h>
+#include <sys/event.h>
+#include <sys/time.h>
 #ifdef HAVE_SYS_STAT_H
 # include <sys/stat.h>
 #endif
@@ -366,11 +369,24 @@ static void *mach_message_pump( void *args )
     mach_register_message_t receive_message = { 0 };
     mach_unregister_message_t *mach_unregister_message;
     sigset_t set;
+    int kq, kr;
+    struct kevent64_s kev;
 
     sigfillset( &set );
     pthread_sigmask( SIG_BLOCK, &set, NULL );
 
-    for (;;)
+    kq = kqueue();
+    kev = (typeof(kev)) {
+        .ident = receive_port,
+        .filter = EVFILT_MACHPORT,
+        .flags = EV_ADD,
+        .fflags = MACH_RCV_MSG,
+    };
+
+    kr = kevent64(kq, &kev, 1, NULL, 0, 0, 0);
+    fprintf( stderr, "msync: create event(%d -> %d)\n", receive_port, kr);
+
+    for (;;kr = kevent64(kq, NULL, 0, &kev, 1, 0, NULL))
     {
         mr = receive_mach_msg( &receive_message );
         if (mr != MACH_MSG_SUCCESS)
@@ -429,6 +445,8 @@ static void *mach_message_pump( void *args )
         }
     }
 
+    close(kq);
+
     return NULL;
 }
 
@@ -474,19 +492,19 @@ static void set_thread_policy_qos( mach_port_t mach_thread_id )
     int throughput_qos, latency_qos;
     kern_return_t kr;
 
-    latency_qos = LATENCY_QOS_TIER_5;
+    latency_qos = LATENCY_QOS_TIER_0;
     kr = thread_policy_set( mach_thread_id, THREAD_LATENCY_QOS_POLICY,
                             (thread_policy_t)&latency_qos,
                             THREAD_LATENCY_QOS_POLICY_COUNT);
     if (kr != KERN_SUCCESS)
-        fprintf(stderr, "msync: error setting thread latency QoS.");
+        fprintf( stderr, "msync: error setting thread latency QoS.");
 
-    throughput_qos = THROUGHPUT_QOS_TIER_5;
+    throughput_qos = THROUGHPUT_QOS_TIER_0;
     kr = thread_policy_set( mach_thread_id, THREAD_THROUGHPUT_QOS_POLICY,
                             (thread_policy_t)&throughput_qos,
                             THREAD_THROUGHPUT_QOS_POLICY_COUNT);
     if (kr != KERN_SUCCESS)
-        fprintf(stderr, "msync: error setting thread throughput QoS.");
+        fprintf( stderr, "msync: error setting thread throughput QoS.");
 
     extended_policy.timeshare = 0;
     kr = thread_policy_set( mach_thread_id, THREAD_EXTENDED_POLICY,
