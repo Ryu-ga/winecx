@@ -6625,7 +6625,7 @@ union generic_reply
 
 /* ### protocol_version begin ### */
 
-#define SERVER_PROTOCOL_VERSION 773
+#define SERVER_PROTOCOL_VERSION 768
 
 /* ### protocol_version end ### */
 

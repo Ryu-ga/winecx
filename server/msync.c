@@ -468,6 +468,8 @@ int do_msync(void)
 #endif
 }
 
+#ifdef __APPLE__
+
 static char shm_name[29];
 static int shm_fd;
 static const off_t shm_size = MAX_INDEX * 16;
@@ -497,14 +499,14 @@ static void set_thread_policy_qos( mach_port_t mach_thread_id )
                             (thread_policy_t)&latency_qos,
                             THREAD_LATENCY_QOS_POLICY_COUNT);
     if (kr != KERN_SUCCESS)
-        fprintf( stderr, "msync: error setting thread latency QoS.");
+        fprintf( stderr, "msync: error setting thread latency QoS.\n" );
 
     throughput_qos = THROUGHPUT_QOS_TIER_0;
     kr = thread_policy_set( mach_thread_id, THREAD_THROUGHPUT_QOS_POLICY,
                             (thread_policy_t)&throughput_qos,
                             THREAD_THROUGHPUT_QOS_POLICY_COUNT);
     if (kr != KERN_SUCCESS)
-        fprintf( stderr, "msync: error setting thread throughput QoS.");
+        fprintf( stderr, "msync: error setting thread throughput QoS.\n" );
 
     extended_policy.timeshare = 0;
     kr = thread_policy_set( mach_thread_id, THREAD_EXTENDED_POLICY,
@@ -520,6 +522,8 @@ static void set_thread_policy_qos( mach_port_t mach_thread_id )
     if (kr != KERN_SUCCESS)
         fprintf( stderr, "msync: error setting precedence policy\n" );
 }
+
+#endif
 
 void msync_init(void)
 {
@@ -677,6 +681,8 @@ static void msync_destroy( struct object *obj )
 #endif
 }
 
+#ifdef __APPLE__
+
 static void *get_shm( unsigned int idx )
 {
     int entry  = (idx * 16) / pagesize;
@@ -714,8 +720,8 @@ static void *get_shm( unsigned int idx )
 
     return (void *)((unsigned long)shm_addrs[entry] + offset);
 }
-
 static unsigned int shm_idx_counter = 1;
+#endif
 
 unsigned int msync_alloc_shm( int low, int high )
 {
@@ -760,6 +766,8 @@ unsigned int msync_alloc_shm( int low, int high )
 #endif
 }
 
+#ifdef __APPLE__
+
 static int type_matches( enum msync_type type1, enum msync_type type2 )
 {
     return (type1 == type2) ||
@@ -771,7 +779,6 @@ struct msync *create_msync( struct object *root, const struct unicode_str *name,
     unsigned int attr, int low, int high, enum msync_type type,
     const struct security_descriptor *sd )
 {
-#ifdef __APPLE__
     struct msync *msync;
 
     if ((msync = create_named_object( root, &msync_ops, name, attr, sd )))
@@ -803,10 +810,6 @@ struct msync *create_msync( struct object *root, const struct unicode_str *name,
     }
 
     return msync;
-#else
-    set_error( STATUS_NOT_IMPLEMENTED );
-    return NULL;
-#endif
 }
 
 /* shm layout for events or event-like objects. */
@@ -816,8 +819,11 @@ struct msync_event
     int unused;
 };
 
+#endif
+
 void msync_signal_all( unsigned int shm_idx )
 {
+#ifdef __APPLE__
     struct msync_event *event;
 
     if (debug_level)
@@ -829,10 +835,12 @@ void msync_signal_all( unsigned int shm_idx )
     event = get_shm( shm_idx );
     if (!__atomic_exchange_n( &event->signaled, 1, __ATOMIC_SEQ_CST ))
         signal_all( shm_idx, (int *)event );
+#endif
 }
 
 void msync_wake_up( struct object *obj )
 {
+#ifdef __APPLE__
     enum msync_type type;
 
     if (debug_level)
@@ -840,17 +848,21 @@ void msync_wake_up( struct object *obj )
 
     if (obj->ops->get_msync_idx)
         msync_signal_all( obj->ops->get_msync_idx( obj, &type ) );
+#endif
 }
 
 void msync_destroy_semaphore( unsigned int shm_idx )
 {
+#ifdef __APPLE__
     if (!shm_idx) return;
 
     destroy_all( shm_idx );
+#endif
 }
 
 void msync_clear_shm( unsigned int shm_idx )
 {
+#ifdef __APPLE__
     struct msync_event *event;
 
     if (debug_level)
@@ -861,10 +873,12 @@ void msync_clear_shm( unsigned int shm_idx )
 
     event = get_shm( shm_idx );
     __atomic_store_n( &event->signaled, 0, __ATOMIC_SEQ_CST );
+#endif
 }
 
 void msync_clear( struct object *obj )
 {
+#ifdef __APPLE__
     enum msync_type type;
 
     if (debug_level)
@@ -872,24 +886,31 @@ void msync_clear( struct object *obj )
 
     if (obj->ops->get_msync_idx)
         msync_clear_shm( obj->ops->get_msync_idx( obj, &type ) );
+#endif
 }
 
 void msync_set_event( struct msync *msync )
 {
+#ifdef __APPLE__
     struct msync_event *event = get_shm( msync->shm_idx );
     assert( msync->obj.ops == &msync_ops );
 
     if (!__atomic_exchange_n( &event->signaled, 1, __ATOMIC_SEQ_CST ))
         signal_all( msync->shm_idx, (int *)event );
+#endif
 }
 
 void msync_reset_event( struct msync *msync )
 {
+#ifdef __APPLE__
     struct msync_event *event = get_shm( msync->shm_idx );
     assert( msync->obj.ops == &msync_ops );
 
     __atomic_store_n( &event->signaled, 0, __ATOMIC_SEQ_CST );
+#endif
 }
+
+#ifdef __APPLE__
 
 struct mutex
 {
@@ -897,8 +918,11 @@ struct mutex
     int count;  /* recursion count */
 };
 
+#endif
+
 void msync_abandon_mutexes( struct thread *thread )
 {
+#ifdef __APPLE__
     struct msync *msync;
 
     LIST_FOR_EACH_ENTRY( msync, &mutex_list, struct msync, mutex_entry )
@@ -914,10 +938,12 @@ void msync_abandon_mutexes( struct thread *thread )
             signal_all ( msync->shm_idx, (int *)mutex );
         }
     }
+#endif
 }
 
 DECL_HANDLER(create_msync)
 {
+#ifdef __APPLE__
     struct msync *msync;
     struct unicode_str name;
     struct object *root;
@@ -947,10 +973,12 @@ DECL_HANDLER(create_msync)
     }
 
     if (root) release_object( root );
+#endif
 }
 
 DECL_HANDLER(open_msync)
 {
+#ifdef __APPLE__
     struct unicode_str name = get_req_unicode_str();
 
     reply->handle = open_object( current->process, req->rootdir, req->access,
@@ -975,11 +1003,13 @@ DECL_HANDLER(open_msync)
         reply->shm_idx = msync->shm_idx;
         release_object( msync );
     }
+#endif
 }
 
 /* Retrieve the index of a shm section which will be signaled by the server. */
 DECL_HANDLER(get_msync_idx)
 {
+#ifdef __APPLE__
     struct object *obj;
     enum msync_type type;
 
@@ -1002,9 +1032,12 @@ DECL_HANDLER(get_msync_idx)
     }
 
     release_object( obj );
+#endif
 }
 
 DECL_HANDLER(get_msync_apc_idx)
 {
+#ifdef __APPLE__
     reply->shm_idx = current->msync_apc_idx;
+#endif
 }

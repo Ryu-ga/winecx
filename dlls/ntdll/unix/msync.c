@@ -67,6 +67,9 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(msync);
 
+
+#ifdef __APPLE__
+
 static LONGLONG update_timeout( ULONGLONG end )
 {
     LARGE_INTEGER now;
@@ -533,6 +536,8 @@ static NTSTATUS msync_wait_multiple( struct msync **wait_objs,
     }
 }
 
+#endif
+
 int do_msync(void)
 {
 #ifdef __APPLE__
@@ -549,6 +554,8 @@ int do_msync(void)
     return 0;
 #endif
 }
+
+#ifdef __APPLE__
 
 struct semaphore
 {
@@ -716,8 +723,11 @@ static NTSTATUS get_object( HANDLE handle, struct msync **obj )
     return ret;
 }
 
+#endif
+
 NTSTATUS msync_close( HANDLE handle )
 {
+#ifdef __APPLE__
     UINT_PTR entry, idx = handle_to_index( handle, &entry );
 
     TRACE("%p.\n", handle);
@@ -729,7 +739,12 @@ NTSTATUS msync_close( HANDLE handle )
     }
 
     return STATUS_INVALID_HANDLE;
+#else
+    return STATUS_NOT_SUPPORTED;
+#endif
 }
+
+#ifdef __APPLE__
 
 static NTSTATUS create_msync( enum msync_type type, HANDLE *handle,
     ACCESS_MASK access, const OBJECT_ATTRIBUTES *attr, int low, int high )
@@ -799,8 +814,11 @@ static NTSTATUS open_msync( enum msync_type type, HANDLE *handle,
     return ret;
 }
 
+#endif
+
 void msync_init(void)
 {
+#ifdef __APPLE__
     struct stat st;
     mach_port_t bootstrap_port;
     void *dlhandle = dlopen( NULL, RTLD_NOW );
@@ -869,24 +887,35 @@ void msync_init(void)
         ERR("Failed bootstrap_look_up for %s\n", shm_name + 1);
         exit(1);
     }
+#endif
 }
 
 NTSTATUS msync_create_semaphore( HANDLE *handle, ACCESS_MASK access,
     const OBJECT_ATTRIBUTES *attr, LONG initial, LONG max )
 {
+#ifdef __APPLE__
     TRACE("name %s, initial %d, max %d.\n",
         attr ? debugstr_us(attr->ObjectName) : "<no name>", initial, max);
 
     return create_msync( MSYNC_SEMAPHORE, handle, access, attr, initial, max );
+#else
+    return STATUS_NOT_SUPPORTED;
+#endif
 }
 
 NTSTATUS msync_open_semaphore( HANDLE *handle, ACCESS_MASK access,
     const OBJECT_ATTRIBUTES *attr )
 {
+#ifdef __APPLE__
     TRACE("name %s.\n", debugstr_us(attr->ObjectName));
 
     return open_msync( MSYNC_SEMAPHORE, handle, access, attr );
+#else
+    return STATUS_NOT_SUPPORTED;
+#endif
 }
+
+#ifdef __APPLE__
 
 static inline void signal_all( struct msync *obj )
 {
@@ -906,8 +935,11 @@ static inline void signal_all( struct msync *obj )
                MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, 0 );
 }
 
+#endif
+
 NTSTATUS msync_release_semaphore( HANDLE handle, ULONG count, ULONG *prev )
 {
+#ifdef __APPLE__
     struct msync *obj;
     struct semaphore *semaphore;
     ULONG current;
@@ -930,10 +962,14 @@ NTSTATUS msync_release_semaphore( HANDLE handle, ULONG count, ULONG *prev )
     signal_all( obj );
 
     return STATUS_SUCCESS;
+#else
+    return STATUS_NOT_SUPPORTED;
+#endif
 }
 
 NTSTATUS msync_query_semaphore( HANDLE handle, void *info, ULONG *ret_len )
 {
+#ifdef __APPLE__
     struct msync *obj;
     struct semaphore *semaphore;
     SEMAPHORE_BASIC_INFORMATION *out = info;
@@ -949,11 +985,15 @@ NTSTATUS msync_query_semaphore( HANDLE handle, void *info, ULONG *ret_len )
     if (ret_len) *ret_len = sizeof(*out);
 
     return STATUS_SUCCESS;
+#else
+    return STATUS_NOT_SUPPORTED;
+#endif
 }
 
 NTSTATUS msync_create_event( HANDLE *handle, ACCESS_MASK access,
     const OBJECT_ATTRIBUTES *attr, EVENT_TYPE event_type, BOOLEAN initial )
 {
+#ifdef __APPLE__
     enum msync_type type = (event_type == SynchronizationEvent ? MSYNC_AUTO_EVENT : MSYNC_MANUAL_EVENT);
 
     TRACE("name %s, %s-reset, initial %d.\n",
@@ -961,18 +1001,26 @@ NTSTATUS msync_create_event( HANDLE *handle, ACCESS_MASK access,
         event_type == NotificationEvent ? "manual" : "auto", initial);
 
     return create_msync( type, handle, access, attr, initial, 0xdeadbeef );
+#else
+    return STATUS_NOT_SUPPORTED;
+#endif
 }
 
 NTSTATUS msync_open_event( HANDLE *handle, ACCESS_MASK access,
     const OBJECT_ATTRIBUTES *attr )
 {
+#ifdef __APPLE__
     TRACE("name %s.\n", debugstr_us(attr->ObjectName));
 
     return open_msync( MSYNC_AUTO_EVENT, handle, access, attr );
+#else
+    return STATUS_NOT_SUPPORTED;
+#endif
 }
 
 NTSTATUS msync_set_event( HANDLE handle, LONG *prev )
 {
+#ifdef __APPLE__
     struct event *event;
     struct msync *obj;
     LONG current;
@@ -992,10 +1040,14 @@ NTSTATUS msync_set_event( HANDLE handle, LONG *prev )
     if (prev) *prev = current;
 
     return STATUS_SUCCESS;
+#else
+    return STATUS_NOT_SUPPORTED;
+#endif
 }
 
 NTSTATUS msync_reset_event( HANDLE handle, LONG *prev )
 {
+#ifdef __APPLE__
     struct event *event;
     struct msync *obj;
     LONG current;
@@ -1011,10 +1063,14 @@ NTSTATUS msync_reset_event( HANDLE handle, LONG *prev )
     if (prev) *prev = current;
 
     return STATUS_SUCCESS;
+#else
+    return STATUS_NOT_SUPPORTED;
+#endif
 }
 
 NTSTATUS msync_pulse_event( HANDLE handle, LONG *prev )
 {
+#ifdef __APPLE__
     struct event *event;
     struct msync *obj;
     LONG current;
@@ -1040,10 +1096,14 @@ NTSTATUS msync_pulse_event( HANDLE handle, LONG *prev )
     if (prev) *prev = current;
 
     return STATUS_SUCCESS;
+#else
+    return STATUS_NOT_SUPPORTED;
+#endif
 }
 
 NTSTATUS msync_query_event( HANDLE handle, void *info, ULONG *ret_len )
 {
+#ifdef __APPLE__
     struct event *event;
     struct msync *obj;
     EVENT_BASIC_INFORMATION *out = info;
@@ -1059,28 +1119,40 @@ NTSTATUS msync_query_event( HANDLE handle, void *info, ULONG *ret_len )
     if (ret_len) *ret_len = sizeof(*out);
 
     return STATUS_SUCCESS;
+#else
+    return STATUS_NOT_SUPPORTED;
+#endif
 }
 
 NTSTATUS msync_create_mutex( HANDLE *handle, ACCESS_MASK access,
     const OBJECT_ATTRIBUTES *attr, BOOLEAN initial )
 {
+#ifdef __APPLE__
     TRACE("name %s, initial %d.\n",
         attr ? debugstr_us(attr->ObjectName) : "<no name>", initial);
 
     return create_msync( MSYNC_MUTEX, handle, access, attr,
         initial ? GetCurrentThreadId() : 0, initial ? 1 : 0 );
+#else
+    return STATUS_NOT_SUPPORTED;
+#endif
 }
 
 NTSTATUS msync_open_mutex( HANDLE *handle, ACCESS_MASK access,
     const OBJECT_ATTRIBUTES *attr )
 {
+#ifdef __APPLE__
     TRACE("name %s.\n", debugstr_us(attr->ObjectName));
 
     return open_msync( MSYNC_MUTEX, handle, access, attr );
+#else
+    return STATUS_NOT_SUPPORTED;
+#endif
 }
 
 NTSTATUS msync_release_mutex( HANDLE handle, LONG *prev )
 {
+#ifdef __APPLE__
     struct mutex *mutex;
     struct msync *obj;
     NTSTATUS ret;
@@ -1101,10 +1173,14 @@ NTSTATUS msync_release_mutex( HANDLE handle, LONG *prev )
     }
 
     return STATUS_SUCCESS;
+#else
+    return STATUS_NOT_SUPPORTED;
+#endif
 }
 
 NTSTATUS msync_query_mutex( HANDLE handle, void *info, ULONG *ret_len )
 {
+#ifdef __APPLE__
     struct msync *obj;
     struct mutex *mutex;
     MUTANT_BASIC_INFORMATION *out = info;
@@ -1121,7 +1197,12 @@ NTSTATUS msync_query_mutex( HANDLE handle, void *info, ULONG *ret_len )
     if (ret_len) *ret_len = sizeof(*out);
 
     return STATUS_SUCCESS;
+#else
+    return STATUS_NOT_SUPPORTED;
+#endif
 }
+
+#ifdef __APPLE__
 
 static NTSTATUS do_single_wait( struct msync *obj, ULONGLONG *end, BOOLEAN alertable )
 {
@@ -1606,6 +1687,8 @@ static void server_set_msgwait( int in_msgwait )
     SERVER_END_REQ;
 }
 
+#endif
+
 /* This is a very thin wrapper around the proper implementation above. The
  * purpose is to make sure the server knows when we are doing a message wait.
  * This is separated into a wrapper function since there are at least a dozen
@@ -1613,6 +1696,7 @@ static void server_set_msgwait( int in_msgwait )
 NTSTATUS msync_wait_objects( DWORD count, const HANDLE *handles, BOOLEAN wait_any,
                              BOOLEAN alertable, const LARGE_INTEGER *timeout )
 {
+#ifdef __APPLE__
     BOOL msgwait = FALSE;
     struct msync *obj;
     NTSTATUS ret;
@@ -1629,11 +1713,15 @@ NTSTATUS msync_wait_objects( DWORD count, const HANDLE *handles, BOOLEAN wait_an
         server_set_msgwait( 0 );
 
     return ret;
+#else
+    return STATUS_NOT_SUPPORTED;
+#endif
 }
 
 NTSTATUS msync_signal_and_wait( HANDLE signal, HANDLE wait, BOOLEAN alertable,
     const LARGE_INTEGER *timeout )
 {
+#ifdef __APPLE__
     struct msync *obj;
     NTSTATUS ret;
 
@@ -1657,4 +1745,7 @@ NTSTATUS msync_signal_and_wait( HANDLE signal, HANDLE wait, BOOLEAN alertable,
     if (ret) return ret;
 
     return msync_wait_objects( 1, &wait, TRUE, alertable, timeout );
+#else
+    return STATUS_NOT_SUPPORTED;
+#endif
 }
