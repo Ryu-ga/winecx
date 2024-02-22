@@ -219,7 +219,7 @@ static inline void add_sem( unsigned int shm_idx, semaphore_t sem, int tid )
 {
     struct sem_node *new_node;
     struct sem_list *list = mach_semaphore_map + shm_idx;
-    
+
     new_node = pool_alloc();
     new_node->sem = sem;
     new_node->tid = tid;
@@ -371,6 +371,7 @@ static void *mach_message_pump( void *args )
     sigset_t set;
     int kq, kr;
     struct kevent64_s kev;
+    struct timespec timeo = { .tv_sec = 1 };
 
     sigfillset( &set );
     pthread_sigmask( SIG_BLOCK, &set, NULL );
@@ -386,7 +387,7 @@ static void *mach_message_pump( void *args )
     kr = kevent64(kq, &kev, 1, NULL, 0, 0, 0);
     fprintf( stderr, "msync: create event(%d -> %d)\n", receive_port, kr);
 
-    for (;;kr = kevent64(kq, NULL, 0, &kev, 1, 0, NULL))
+    for (;;kr = kevent64(kq, NULL, 0, &kev, 1, 0, &timeo))
     {
         mr = receive_mach_msg( &receive_message );
         if (mr != MACH_MSG_SUCCESS)
