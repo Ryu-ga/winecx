@@ -349,7 +349,7 @@ static inline BOOL disable_d3dmetal(void)
 {
 #ifdef __APPLE__
     if (getenv( "D3DM_DISABLED" ))
-        return FALSE;
+        return TRUE;
     if (*_NSGetArgc() <= 1)
         return FALSE;
     if (strstr((*_NSGetArgv())[1], "Rockstar Games\\Launcher\\Launcher.exe"))
